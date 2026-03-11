@@ -30,7 +30,7 @@ ARGUMENTS = [
     DeclareLaunchArgument('world', default_value='bird_demo1', description='Simulation World'),
     DeclareLaunchArgument('model', default_value='standard', choices=['standard', 'lite'], description='Turtlebot4 Model'),
     DeclareLaunchArgument('use_sim_time', default_value='true', choices=['true', 'false'], description='use_sim_time'),
-    DeclareLaunchArgument('map', default_value=PathJoinSubstitution([pkg_dis_tutorial3, 'maps', 'bird_demo.yaml']), description='Full path to map yaml file to load')
+    DeclareLaunchArgument('map', default_value=PathJoinSubstitution([pkg_dis_tutorial3, 'maps', 'map3.yaml']), description='Full path to map yaml file to load')
 ]
 
 for pose_element in ['x', 'y', 'z', 'yaw']:
