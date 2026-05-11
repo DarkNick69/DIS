@@ -1,0 +1,13 @@
+﻿colcon build --symlink-install
+
+pkill -9 -f ros && ros2 daemon stop
+ros2 run rmw_zenoh_cpp rmw_zenohd
+
+ros2 launch dis_tutorial3 sim_turtlebot_slam.launch.py
+ros2 launch dis_tutorial3 sim_turtlebot_nav.launch.py
+
+ros2 run dis_tutorial3 object_detection_node.py
+ros2 run dis_tutorial4_yellow_nodes object_localizer_node
+ros2 run dis_tutorial4_yellow_nodes ring_color_announce_service
+ros2 run dis_tutorial3 robot_commander.py
+ros2 topic echo /clicked_point
