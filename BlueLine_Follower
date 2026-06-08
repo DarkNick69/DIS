@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+
+import math
+
+import cv2
+import numpy as np
+import rclpy
+import rclpy.time
+import tf2_ros
+from cv_bridge import CvBridge, CvBridgeError
+from geometry_msgs.msg import TwistStamped
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
+from std_msgs.msg import Bool, String
+from tf2_ros import TransformException
+
+
+class BlueLineFollower(Node):
+
+    FOLLOWING = 0
+    REVERSING = 1
+    DONE = 2
+
+    STATE_NAMES = {0: 'FOLLOWING', 1: 'REVERSING', 2: 'DONE'}
+
+    def __init__(self):
+        super().__init__('blue_line')
+
+        # --- Tunable parameters ---
+        self.linear_speed = 0.15
+        self.angular_gain = 1.2
+        self.min_blob_area = 300    # px²
+        self.fork_radius = 0.3      # m
+
+        self.blue_lower = np.array([100, 80, 50])
+        self.blue_upper = np.array([130, 255, 255])
+
+        # --- State ---
+        self.state = self.FOLLOWING
+        self.enabled = False
+
+        # Fork stack: {id, x, y, branch_idx, total_branches}
+        self.fork_stack = []
+        self.fork_counter = 0       # global fork ID counter
+
+        self.bridge = CvBridge()
+
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        self.latest_image = None
+        self.latest_blobs = []
+        self.arm_set = False
+
+        # For throttling high-frequency prints
+        self._log_tick = 0
+
+        # --- Subscribers ---
+        self.create_subscription(
+            Image, '/top_camera/rgb/preview/image_raw',
+            self.top_camera_callback, qos_profile_sensor_data)
+        self.create_subscription(
+            Bool, '/blue_line/enable',
+            self.enable_callback, 10)
+
+        # --- Publishers ---
+        self.cmd_vel_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
+        self.arm_pub = self.create_publisher(String, '/arm_command', 10)
+
+        self.arm_timer = self.create_timer(1.0, self.set_arm_once)
+        self.create_timer(0.1, self.control_loop)
+
+        self.get_logger().info("=" * 50)
+        self.get_logger().info("Blue Line Follower initialized.")
+        self.get_logger().info("Waiting for /blue_line/enable=true to start.")
+        self.get_logger().info("=" * 50)
+
+    # ------------------------------------------------------------------ #
+    # Setup                                                                #
+    # ------------------------------------------------------------------ #
+
+    def set_arm_once(self):
+        if not self.arm_set:
+            msg = String()
+            msg.data = 'look_for_qr'
+            self.arm_pub.publish(msg)
+            self.arm_set = True
+            self.arm_timer.cancel()
+            self.get_logger().info("[ARM] Set to look_for_qr.")
+
+    def enable_callback(self, msg: Bool):
+        if msg.data and not self.enabled:
+            self.enabled = True
+            self.state = self.FOLLOWING
+            self.fork_stack.clear()
+            self.fork_counter = 0
+            self.get_logger().info("=" * 50)
+            self.get_logger().info("[ENABLE] Blue line follower STARTED.")
+            self.get_logger().info("=" * 50)
+        elif not msg.data:
+            self.enabled = False
+            self.stop_robot()
+            self.get_logger().info("[ENABLE] Blue line follower STOPPED.")
+
+    def _set_state(self, new_state):
+        if new_state != self.state:
+            self.get_logger().info(
+                f"[STATE] {self.STATE_NAMES[self.state]} → {self.STATE_NAMES[new_state]}")
+            self.state = new_state
+
+    # ------------------------------------------------------------------ #
+    # TF                                                                   #
+    # ------------------------------------------------------------------ #
+
+    def get_robot_pose(self):
+        try:
+            t = self.tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
+            return t.transform.translation.x, t.transform.translation.y
+        except TransformException:
+            return None, None
+
+    def _near_fork(self, rx, ry, fork):
+        if rx is None:
+            return False
+        return math.sqrt((fork['x'] - rx) ** 2 + (fork['y'] - ry) ** 2) <= self.fork_radius
+
+    # ------------------------------------------------------------------ #
+    # Camera callback                                                      #
+    # ------------------------------------------------------------------ #
+
+    def top_camera_callback(self, msg: Image):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        except CvBridgeError as e:
+            self.get_logger().error(f"[CAMERA] CV bridge error: {e}")
+            return
+
+        self.latest_image = cv_image
+
+        hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
+        k = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+
+        _, _, stats, centroids = cv2.connectedComponentsWithStats(mask)
+
+        blobs = []
+        for i in range(1, len(stats)):
+            if stats[i, cv2.CC_STAT_AREA] >= self.min_blob_area:
+                blobs.append((int(centroids[i][0]), int(centroids[i][1]), int(stats[i, cv2.CC_STAT_AREA])))
+        blobs.sort(key=lambda b: b[0])
+        self.latest_blobs = blobs
+
+    # ------------------------------------------------------------------ #
+    # Control loop                                                         #
+    # ------------------------------------------------------------------ #
+
+    def control_loop(self):
+        self._log_tick += 1
+
+        if not self.enabled or self.state == self.DONE:
+            return
+        if self.latest_image is None:
+            if self._log_tick % 20 == 0:
+                self.get_logger().warn("[CAMERA] No image received yet from top camera.")
+            return
+
+        blobs = self.latest_blobs
+        img_cx = self.latest_image.shape[1] // 2
+
+        # Periodic heartbeat: blob count + current state
+        if self._log_tick % 10 == 0:
+            blob_summary = ', '.join(f"cx={b[0]} area={b[2]}" for b in blobs)
+            self.get_logger().info(
+                f"[TICK] state={self.STATE_NAMES[self.state]}  "
+                f"blobs={len(blobs)}  [{blob_summary}]")
+
+        if self.state == self.FOLLOWING:
+            self._handle_following(blobs, img_cx)
+        elif self.state == self.REVERSING:
+            self._handle_reversing(blobs, img_cx)
+
+    def _handle_following(self, blobs, img_cx):
+        if not blobs:
+            self.get_logger().info("[FOLLOW] No blue line visible — dead end detected.")
+            self.get_logger().info("[FOLLOW] Stopping and switching to REVERSING.")
+            self._set_state(self.REVERSING)
+            self.stop_robot()
+            return
+
+        if len(blobs) == 1:
+            cx = blobs[0][0]
+            error = (img_cx - cx) / img_cx
+            if self._log_tick % 5 == 0:
+                self.get_logger().info(
+                    f"[FOLLOW] Single line — centroid cx={cx}  "
+                    f"img_cx={img_cx}  error={error:.3f}  "
+                    f"angular_z={self.angular_gain * error:.3f}")
+            self.follow_centroid(cx, img_cx)
+            return
+
+        # 2+ blobs → fork
+        rx, ry = self.get_robot_pose()
+        pose_str = f"({rx:.2f}, {ry:.2f})" if rx is not None else "(unknown)"
+
+        # Still near a registered fork — keep following the active branch
+        if self.fork_stack and self._near_fork(rx, ry, self.fork_stack[-1]):
+            entry = self.fork_stack[-1]
+            idx = min(entry['branch_idx'], len(blobs) - 1)
+            if self._log_tick % 5 == 0:
+                self.get_logger().info(
+                    f"[FORK {entry['id']}] Still near fork — "
+                    f"continuing on edge {entry['branch_idx'] + 1}/{entry['total_branches']}  "
+                    f"cx={blobs[idx][0]}")
+            self.follow_centroid(blobs[idx][0], img_cx)
+            return
+
+        # New fork
+        self.fork_counter += 1
+        fid = self.fork_counter
+        n = len(blobs)
+        blob_positions = [b[0] for b in blobs]
+
+        self.get_logger().info("─" * 50)
+        self.get_logger().info(f"[FORK {fid}] Split detected at robot pose {pose_str}")
+        self.get_logger().info(f"[FORK {fid}] Number of edges: {n}  (blob cx values: {blob_positions})")
+        self.get_logger().info(f"[FORK {fid}] Going into edge 1 (leftmost, cx={blobs[0][0]})")
+        self.get_logger().info("─" * 50)
+
+        if rx is not None:
+            self.fork_stack.append({
+                'id': fid,
+                'x': rx, 'y': ry,
+                'branch_idx': 0,
+                'total_branches': n,
+            })
+        self.follow_centroid(blobs[0][0], img_cx)
+
+    def _handle_reversing(self, blobs, img_cx):
+        if not self.fork_stack:
+            self.get_logger().info("=" * 50)
+            self.get_logger().info("[DONE] All branches of all forks explored.")
+            self.get_logger().info("=" * 50)
+            self._set_state(self.DONE)
+            self.stop_robot()
+            return
+
+        rx, ry = self.get_robot_pose()
+        entry = self.fork_stack[-1]
+        pose_str = f"({rx:.2f}, {ry:.2f})" if rx is not None else "(unknown)"
+
+        dist = None
+        if rx is not None:
+            dist = math.sqrt((entry['x'] - rx) ** 2 + (entry['y'] - ry) ** 2)
+
+        if self._log_tick % 5 == 0:
+            dist_str = f"{dist:.2f} m" if dist is not None else "unknown"
+            self.get_logger().info(
+                f"[REVERSE] Heading back to fork {entry['id']}  "
+                f"distance remaining ≈ {dist_str}  "
+                f"current pose {pose_str}  "
+                f"blobs visible: {len(blobs)}")
+
+        # Back at the fork
+        if len(blobs) >= 2 and self._near_fork(rx, ry, entry):
+            entry['branch_idx'] += 1
+
+            if entry['branch_idx'] >= entry['total_branches']:
+                self.get_logger().info(
+                    f"[FORK {entry['id']}] All {entry['total_branches']} edges explored — popping fork.")
+                self.fork_stack.pop()
+                self.reverse_robot()
+                return
+
+            idx = min(entry['branch_idx'], len(blobs) - 1)
+            edge_num = entry['branch_idx'] + 1
+            self.get_logger().info("─" * 50)
+            self.get_logger().info(
+                f"[FORK {entry['id']}] Returned to fork at {pose_str}")
+            self.get_logger().info(
+                f"[FORK {entry['id']}] Going into edge {edge_num}/{entry['total_branches']}  "
+                f"(cx={blobs[idx][0]})")
+            self.get_logger().info("─" * 50)
+            self._set_state(self.FOLLOWING)
+            self.follow_centroid(blobs[idx][0], img_cx)
+        else:
+            self.reverse_robot()
+
+    # ------------------------------------------------------------------ #
+    # Motion helpers                                                       #
+    # ------------------------------------------------------------------ #
+
+    def follow_centroid(self, cx: int, img_cx: int):
+        twist = TwistStamped()
+        twist.header.stamp = self.get_clock().now().to_msg()
+        twist.header.frame_id = 'base_link'
+        error = (img_cx - cx) / img_cx
+        twist.twist.linear.x = self.linear_speed
+        twist.twist.angular.z = self.angular_gain * error
+        self.cmd_vel_pub.publish(twist)
+
+    def reverse_robot(self):
+        twist = TwistStamped()
+        twist.header.stamp = self.get_clock().now().to_msg()
+        twist.header.frame_id = 'base_link'
+        twist.twist.linear.x = -self.linear_speed * 0.6
+        self.cmd_vel_pub.publish(twist)
+
+    def stop_robot(self):
+        twist = TwistStamped()
+        twist.header.stamp = self.get_clock().now().to_msg()
+        twist.header.frame_id = 'base_link'
+        self.cmd_vel_pub.publish(twist)
+
+
+def main():
+    rclpy.init(args=None)
+    node = BlueLineFollower()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
