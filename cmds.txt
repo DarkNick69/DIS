@@ -5,7 +5,7 @@ ros2 run rmw_zenoh_cpp rmw_zenohd
 
 unset LIBGL_ALWAYS_SOFTWARE
 unset MESA_GL_VERSION_OVERRIDE
-ros2 launch dis_tutorial7 sim_turtlebot_slam.launch.py world:=task2
+ros2 launch dis_tutorial7 sim_turtlebot_nav.launch.py world:=task2 map:=/home/xi/colcon_ws/src/dis_tutorial3/maps/task2.yaml
 
 ros2 launch dis_tutorial3 sim_turtlebot_nav.launch.py
 
