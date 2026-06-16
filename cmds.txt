@@ -7,6 +7,12 @@ unset LIBGL_ALWAYS_SOFTWARE
 unset MESA_GL_VERSION_OVERRIDE
 ros2 launch dis_tutorial7 sim_turtlebot_nav.launch.py world:=task2 map:=/home/xi/colcon_ws/src/dis_tutorial3/maps/task2.yaml
 
+*For Blue Line Follower*
+ros2 run dis_tutorial7 arm_mover_actions.py
+ros2 run dis_tutorial7 BlueLine_Follower.py
+ros2 run rqt_image_view rqt_image_view /blue_line/debug_image
+ros2 topic pub --once /blue_line/enable std_msgs/msg/Bool "data: true"
+
 ros2 launch dis_tutorial3 sim_turtlebot_nav.launch.py
 
 source /opt/ultralytics/bin/activate
