@@ -1,7 +1,7 @@
 # Final Report
 
 ## Team Chi
-## Members: Rok Jurinčič and Nick <add your surname>
+## Members: Rok Jurinčič and Nikolaos Stampoulidis
 
 ## 1. Introduction
 
