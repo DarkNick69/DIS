@@ -1,0 +1,24 @@
+Faces detected: 4
+  Face 1: position (1.78, -4.13)
+  Face 2: position (-4.00, 0.66)
+  Face 3: position (-1.89, 0.86)
+  Face 4: position (-2.03, -9.57)
+
+Rings detected: 4
+  green: 2
+  blue: 1
+  red: 1
+
+Barrels detected: 10
+  Barrel 1: red, vertical position, no spillage
+  Barrel 2: yellow, vertical position, no spillage
+  Barrel 3: black, horizontal position, no spillage
+  Barrel 4: black, vertical position, no spillage
+  Barrel 5: blue, horizontal position, no spillage
+  Barrel 6: green, vertical position, no spillage
+  Barrel 7: yellow, horizontal position, no spillage
+  Barrel 8: red, horizontal position, no spillage
+  Barrel 9: orange, vertical position, no spillage
+  Barrel 10: orange, horizontal position, spillage present
+[WARN] [1782305871.344599881] [robot_commander]: reportlab not installed — PDF not generated. Install with: pip install reportlab
+ 
